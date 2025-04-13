@@ -47,6 +47,8 @@
 //    This code is released into the public domain.
 //    https://namoseley.wordpress.com/2015/02/04/freescale-kinetis-mk20dx-series-flash-erasing/
 
+#include <CAN.h>
+
 #include <SD.h>
 #include "FXUtil.h"		// read_ascii_line(), hex file support
 extern "C" {
@@ -94,6 +96,9 @@ void setup ()
   serial->printf( "WARNING: this can ruin your device!\n" );
   serial->printf( "target = %s (%dK flash in %dK sectors)\n",
 			FLASH_ID, FLASH_SIZE/1024, FLASH_SECTOR_SIZE/1024);
+      
+  // init can
+  CAN::init();
 			
 #if (LARGE_ARRAY) // if true, access array so it doesn't get optimized out
   serial->printf( "Large Array -- %08lX\n", (uint32_t)&a[15][15][15][15][15] );
@@ -102,53 +107,54 @@ void setup ()
 
 void loop ()
 {
-  uint32_t buffer_addr, buffer_size;
+  CAN::handleInbox();
+  // uint32_t buffer_addr, buffer_size;
 
-  // create flash buffer to hold new firmware
-  if (firmware_buffer_init( &buffer_addr, &buffer_size ) == 0) {
-    serial->printf( "unable to create buffer\n" );
-    serial->flush();
-    for (;;) {}
-  }
+  // // create flash buffer to hold new firmware
+  // if (firmware_buffer_init( &buffer_addr, &buffer_size ) == 0) {
+  //   serial->printf( "unable to create buffer\n" );
+  //   serial->flush();
+  //   for (;;) {}
+  // }
   
-  serial->printf( "created buffer = %1luK %s (%08lX - %08lX)\n",
-		buffer_size/1024, IN_FLASH(buffer_addr) ? "FLASH" : "RAM",
-		buffer_addr, buffer_addr + buffer_size );
+  // serial->printf( "created buffer = %1luK %s (%08lX - %08lX)\n",
+	// 	buffer_size/1024, IN_FLASH(buffer_addr) ? "FLASH" : "RAM",
+	// 	buffer_addr, buffer_addr + buffer_size );
 
-  // get user input to read from serial or SD
-  int user_input = -1;
-  char line[32];
-  while (user_input != 1 && user_input != 2) {
-    serial->printf( "enter 1 for hex file via serial, 2 for hex file via SD\n" );
-    read_ascii_line( serial, line, sizeof(line) );
-    sscanf( line, "%d", &user_input );
-  }
+  // // get user input to read from serial or SD
+  // int user_input = -1;
+  // char line[32];
+  // while (user_input != 1 && user_input != 2) {
+  //   serial->printf( "enter 1 for hex file via serial, 2 for hex file via SD\n" );
+  //   read_ascii_line( serial, line, sizeof(line) );
+  //   sscanf( line, "%d", &user_input );
+  // }
   
-  if (user_input == 1) { // serial 
-    // read hex file, write new firmware to flash, clean up, reboot
-    update_firmware( serial, serial, buffer_addr, buffer_size );
-  }
-  else if (user_input == 2) { // SD
-    if (!SD.begin( cs )) {
-      serial->println( "SD initialization failed" );
-      return;
-    }
-    File hexFile;
-    serial->println( "SD initialization OK" );
-    hexFile = SD.open( HEX_FILE_NAME, FILE_READ );
-    if (!hexFile) {
-      serial->println( "SD file open failed" );
-      return;
-    }
-    serial->println( "SD file open OK" );
-    // read hex file, write new firmware to flash, clean up, reboot
-    update_firmware( &hexFile, serial, buffer_addr, buffer_size );
-  }
+  // if (user_input == 1) { // serial 
+  //   // read hex file, write new firmware to flash, clean up, reboot
+  //   update_firmware( serial, serial, buffer_addr, buffer_size );
+  // }
+  // else if (user_input == 2) { // SD
+  //   if (!SD.begin( cs )) {
+  //     serial->println( "SD initialization failed" );
+  //     return;
+  //   }
+  //   File hexFile;
+  //   serial->println( "SD initialization OK" );
+  //   hexFile = SD.open( HEX_FILE_NAME, FILE_READ );
+  //   if (!hexFile) {
+  //     serial->println( "SD file open failed" );
+  //     return;
+  //   }
+  //   serial->println( "SD file open OK" );
+  //   // read hex file, write new firmware to flash, clean up, reboot
+  //   update_firmware( &hexFile, serial, buffer_addr, buffer_size );
+  // }
   
-  // return from update_firmware() means error or user abort, so clean up and
-  // reboot to ensure that static vars get boot-up initialized before retry
-  serial->printf( "erase FLASH buffer / free RAM buffer...\n" );
-  firmware_buffer_free( buffer_addr, buffer_size );
-  serial->flush();
-  REBOOT;
+  // // return from update_firmware() means error or user abort, so clean up and
+  // // reboot to ensure that static vars get boot-up initialized before retry
+  // serial->printf( "erase FLASH buffer / free RAM buffer...\n" );
+  // firmware_buffer_free( buffer_addr, buffer_size );
+  // serial->flush();
+  // REBOOT;
 }

@@ -14,6 +14,9 @@ namespace HexTransfer {
   #define MAX_HEX_CHUNK_SIZE 5      // Max size of hex data in a segment, in bytes
   #define MAX_CHUNKS_PER_HEX_LINE 9 // 45/5 = 9
   #define PAD 0xFF 
+  
+  #define HEX_LINE_TIMEOUT_LEN 5000     // Timeout for receiving hex line segments, in ms
+  #define INACTIVITY_TIMEOUT_LEN 15000  // Timeout for inactivity, in ms
 
   // ----------------------------------------------------------------------------
   // Hex Transfer Structs
@@ -60,6 +63,21 @@ namespace HexTransfer {
     bool eof_received;        // Flag to indicate if EOF has been reached
     size_t lines;    // Number of hex records received
   };
+
+  /*
+   * Acks
+   * - TRANSFER_INIT_OK
+   * - HEX_LINE_OK
+   * - HEX_LINE_SEGMENT_TIMEOUT
+   * - HEX_FILE_SUCCESS
+   * Errors
+   * - TRANSFER_INIT_CHECKSUM_ERROR
+   * - HEX_LINE_PARSE_ERROR
+   * - HEX_LINE_PROCESSING_ERROR
+   * - HEX_LINE_SEGMENT_TIMEOUT
+   * - INACTIVITY_TIMEOUT
+   * - HEX_FILE_CHECKSUM_ERROR
+  */
 
   // -----------------------------------------------------------------
   // Hex Transfer Result Enum
@@ -183,8 +201,9 @@ namespace HexTransfer {
   bool process_hex_extended_linear_address_record(ParsedHexLine &hex_line);
   bool process_hex_start_linear_address_record(ParsedHexLine &hex_line);
   
-
+  // --------------------------------------------------------------------------
   // Helper Functions
+  // --------------------------------------------------------------------------
   bool are_all_segments_received();
   void add_hex_line_to_checksum();
   bool is_file_checksum_valid();
@@ -192,6 +211,8 @@ namespace HexTransfer {
   void reset_hex_file_info();  
   bool is_transfer_in_progress();
   bool is_file_transfer_complete();
+  bool has_segment_timed_out();
+  bool has_transfer_timed_out();
   
   // ----------------------------------------------------------------------------
   // Main Functions

@@ -107,10 +107,17 @@ namespace HexTransfer
   uint32_t computed_file_checksum;  
 
   // CRC32 object for calculating the checksum of the hex file
-  FastCRC32 CRC32;                  
+  FastCRC32 CRC32;
+  
+  // --------------------------------------------------------------------------
+  // Timeout Variables
+  // --------------------------------------------------------------------------
+  // These variables are used to keep track of the timeouts for the hex transfer
+  // and the inactivity timeout.
+  
+  uint32_t last_can_msg_ts = 0;
 
 } // namespace HexTransfer
-
 
 
 
@@ -129,18 +136,19 @@ void HexTransfer::update() {
   // Return if no transfer is in progress
   if (!transfer_in_progress) return;
   
-  // Check if timeout has occurred
-  // if (check_inactivity_timout()) {
-  //   send_response(HexResult::INACTIVITY_TIMEOUT);
-  //   abort_transfer();
-  //   return;
-  // }
-  // Check segment timeout
-
   HexResult res = HexResult::NONE;
   
+  // Check if the transfer has timed out
+  if (has_transfer_timed_out()) {
+    res = HexResult::INACTIVITY_TIMEOUT;
+    abort_transfer();
+  }
+  // Check if the segment has timed out
+  else if (has_segment_timed_out()) {
+    res = HexResult::HEX_LINE_SEGMENT_TIMEOUT;
+  }
   // Check if a new transfer init message has been received
-  if (new_transfer_init_msg_received ) {
+  else if (new_transfer_init_msg_received ) {
     res = transfer_init_msg_error
             ? HexResult::TRANSFER_INIT_CHECKSUM_ERROR
             : HexResult::TRANSFER_INIT_OK;
@@ -685,4 +693,14 @@ bool HexTransfer::is_transfer_in_progress() {
 bool HexTransfer::is_file_transfer_complete() {
   // Check if the file transfer is complete
   return file_transfer_complete;
+}
+
+bool HexTransfer::has_segment_timed_out() {
+  // Check if the segment has timed out
+  return (millis() - last_can_msg_ts) > HEX_LINE_TIMEOUT_LEN;
+}
+
+bool HexTransfer::has_transfer_timed_out() {
+  // Check if the transfer has timed out
+  return (millis() - last_can_msg_ts) > INACTIVITY_TIMEOUT_LEN;
 }

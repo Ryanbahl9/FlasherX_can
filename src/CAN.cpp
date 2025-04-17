@@ -4,7 +4,7 @@
 #include "CAN.h"
 
 #define PAD 0xFF 
-#define HEX_DATA_CHUNK_SIZE 5         // 5 bytes per chunk
+#define HEX_DATA_CHUNK_SIZE 5         // 5 bytes per segment
 
 FlexCAN CANbus(500000);
 
@@ -19,52 +19,14 @@ void CAN::init() {
 void CAN::handleInbox() {
   while (CANbus.read(rxmsg)) {
     uint8_t deviceID = (uint8_t) (rxmsg.id & 0xFFu);
-    uint8_t msgID = (uint8_t) (rxmsg.id / 256);
+    // uint8_t msgID = (uint8_t) (rxmsg.id / 256);
     
     if (deviceID == 0x0) {
-      print_hex_payload_msg(rxmsg.buf);
+      HexTransfer::process_can_msg(rxmsg.buf);
     }
-    else if (deviceID == 120)
-    {
-      // Serial.println("Heartbeat Received");
-    }
-    
-    // print message received
-    
-    // _printCAN(rxmsg);
-    
-    // print_hex_payload_msg(rxmsg.buf);
-    // Print the message to the serial monitor
     
     CAN::wipeMessage();
   }
-}
-
-void CAN::print_hex_payload_msg(uint8_t (&buf)[8]) {
-  // union CanHexPayloadMsg  with 64 bits (8 bytes)
-  CanHexPayloadMsg msg;
-  memcpy(&msg, buf, sizeof(msg));
-  
-  Serial.print(msg.msg_type);
-  Serial.print(" ");
-  Serial.print(msg.line_number);
-  Serial.print(" ");
-  Serial.print(msg.chunk_num);
-  Serial.print(" ");
-  Serial.print(msg.total_chunks);
-  Serial.print(" ");
-  // for each byte in hex_data, print as char
-  for (size_t i = 0; i < HEX_DATA_CHUNK_SIZE; ++i) {
-    // if the byte is 0xFF, print a dot
-    if (static_cast<uint8_t>(msg.hex_data >> (8 * i)) == PAD) {
-      Serial.print(".");
-    }
-    else {
-      Serial.print(static_cast<char>(msg.hex_data >> (8 * i)));
-    }
-  }
-  Serial.println();
-  
 }
 
 void CAN::wipeMessage() {

@@ -1,119 +1,395 @@
 #include "HexTransfer.h"
 
-
-HexTransfer::HexTransfer()
+namespace HexTransfer
 {
+  // --------------------------------------------------------------------------
+  // Flash Buffer Variables
+  // --------------------------------------------------------------------------
+  // Info about the buffer in flash space. This is set externally by the
+
+  uint32_t flash_buffer_addr; // Address of the buffer in flash space
+  
+  uint32_t flash_buffer_size; // Size of the buffer in flash space
+  
+  bool flash_buffer_initialized; // Flag to indicate if the buffer has been initialized
+
+  // --------------------------------------------------------------------------
+  // Hex File Info Variables
+  // --------------------------------------------------------------------------
+  // These variables are used to store information about the hex file being
+  // transferred.
+  //
+  // The base_address, start_address, and eof_received fields represent standard
+  // Intel HEX file information. For details, see:
+  //   https://en.wikipedia.org/wiki/Intel_HEX
+  //
+  // The min_address, max_address, total_lines, and file_checksum fields are used for
+  // validating the hex file and ensuring that the entire file has been
+  // received correctly.
+  // 
+  // Note:
+  //   - Logic for Hex records 02 (Extended Segment Address) and 03 (Start 
+  //     Segment Address) are present future compatibility with other 
+  //     platforms, but are not used because no Teensy board employs segmented
+  //     addressing.
+  
+  // Base address to be added to each hex line address.
+  // Set by hex records: 02 (Extended Segment Address)
+  //                     04 (Extended Linear Address)
+  uint32_t base_address = 0;
+
+  // Starting address of the hex file in teensy's flash
+  // Set by hex records: 03 (Start Segment Address)
+  //                     05 (Start Linear Address)
+  // Unused for teensyduinos, they always set the start address to 0x0000. Leaving
+  // this here for future compatibility with other platforms.
+  uint32_t start_address = 0; 
+
+  // Minimum address in the hex file in teensy's flash.
+  // Calculated while processing hex data records.
+  uint32_t min_address = 0xFFFFFFFF;   
+
+  // Maximum address in the hex file in teensy's flash
+  // Calculated while processing hex data records.
+  uint32_t max_address = 0;   
+                          
+  // Flag to indicate if EOF has been reached and eof record has been received
+  bool eof_received = false;
+
+  // Total number of line we expect to receive in the hex file
+  size_t total_lines;     
+ 
+  // Checksum of the entire hex file in CRC32 format
+  uint32_t received_file_checksum;  
+
+  // --------------------------------------------------------------------------
+  // Current Hex Line Variables
+  // --------------------------------------------------------------------------
+  // These variables are used to store information about the current hex line
+  // being received.
+  // This buffer will be eventually parsed into a ParsedHexLine struct.
+  
+  // Current hex line number being received. 0 indexed.
+  size_t hex_line_num;                  
+
+  // Number of segments the current hex line has been split into
+  int hex_line_segment_count;
+  
+  // Array to keep track of which segments have been received for the current
+  // hex line
+  bool* hex_line_segments_received;     
+
+  // The buffer the segments are copied into
+  char hex_line_buf[MAX_HEX_LINE_SIZE]; 
+  
+  // --------------------------------------------------------------------------
+  // Hex Transfer State Variables
+  // --------------------------------------------------------------------------
+  // These variables are used to keep track of the state of the hex transfer
+  
+  // Flag to indicate if a transfer init message was received in the last cycle.
+  // This is used to determine if we should send an acknowledgment this cycle.
+  bool new_transfer_init_msg_received;  
+  
+  // Flag to indicate if the transfer init message was received and valid
+  bool transfer_init_msg_error;     
+
+  // Flag to indicate if a transfer is in progress. Set when a Transfer Init
+  // message is received and cleared when the transfer is complete or aborted.
+  bool transfer_in_progress;        
+
+  // Flag to indicate if the file transfer is complete. Set when all lines have
+  // been received and the checksum is valid.
+  bool file_transfer_complete;      
+  
+  // Checksum of the hex file being received. This is calculated by adding the 
+  // checksum of each hex line as it is received.
+  uint32_t computed_file_checksum;  
+
+  // CRC32 object for calculating the checksum of the hex file
+  FastCRC32 CRC32;                  
+
+} // namespace HexTransfer
+
+
+
+
+// --------------------------------------------------------------------------
+// Main Functions
+// --------------------------------------------------------------------------
+void HexTransfer::init(){ 
+  // Initialize the hex file info variables
+  reset_hex_file_info();
+  
   // Initialize the hex line 
-  cur_hex_line_num = -1;
-  cur_hex_line_chunk_count = -1;
-  memset(cur_hex_line_data, PAD, sizeof(cur_hex_line_data));
-  memset(chunks_received, false, sizeof(chunks_received));
+  reset_cur_hex_line_buff();
 }
 
-HexTransfer::~HexTransfer()
-{
+void HexTransfer::update() {
+  // Return if no transfer is in progress
+  if (!transfer_in_progress) return;
+  
+  // Check if timeout has occurred
+  // if (check_inactivity_timout()) {
+  //   send_response(HexResult::INACTIVITY_TIMEOUT);
+  //   abort_transfer();
+  //   return;
+  // }
+  // Check segment timeout
+
+  HexResult res = HexResult::NONE;
+  
+  // Check if a new transfer init message has been received
+  if (new_transfer_init_msg_received ) {
+    res = transfer_init_msg_error
+            ? HexResult::TRANSFER_INIT_CHECKSUM_ERROR
+            : HexResult::TRANSFER_INIT_OK;
+  }
+  // Handle the received hex line if all segments have been received
+  else if (are_all_segments_received()) {
+    res = handle_received_hex_line();
+  }
+  // Check if the EOF record has been received
+  else if (eof_received) {
+    if (!is_file_checksum_valid()) {
+      res = HexResult::HEX_FILE_CHECKSUM_ERROR;
+      abort_transfer();
+    }
+    else {
+      res = HexResult::HEX_FILE_SUCCESS;
+      transfer_in_progress = false;
+      file_transfer_complete = true;
+    }
+  }
+  
+  // Send the response
+  send_response(res);
 }
 
 void HexTransfer::process_can_msg(uint8_t (&buf)[8])
 {
-  // check if the first bit is 0
   if ((buf[0] & 0x01) == 0) {
     // Message is a TransferInitMsg
+    // Unpack the message
+    TransferInitMsg msg = unpack_transfer_init_msg(buf);
+
+    // Process and Report if the message is invalid
+    if (!process_transfer_init_msg(msg)) {
+      Serial.println("Error processing transfer init message!");
+      
+      return;
+    }
+  }
+  else {
+    // Message is a TransferSegmentMsg
+    // Unpack the message
+    TransferSegmentMsg msg = unpack_transfer_segment_msg(buf);
+
+    // Process and Report if the message is invalid
+    if (!process_transfer_segment_msg(msg)) {
+      Serial.println("Error processing transfer segment message!");
+      return;
+    }
   }
 
-  /// Message is a TransferChunkMsg
-  // Unpack the message
-  TransferChunkMsg msg = unpack_transfer_chunk_msg(buf);
-  
-  // Check if the message type is valid
-  if (!process_transfer_chunk_msg(msg)) {
-    // Handle error
-    Serial.println("Error processing transfer chunk message!");
-    return;
-  }
-  
-  // Check if all chunks for the current line have been received
-  if (all_chunks_received) {
-    parse_and_validate_hex_line(cur_hex_line_data);
-  }
 }
 
-TransferChunkMsg HexTransfer::unpack_transfer_chunk_msg(uint8_t (&buf)[8]) {
-  // Initialize the TransferChunkMsg structure
-  TransferChunkMsg m{};
+void HexTransfer::abort_transfer() {
+  // Reset the hex line variables
+  reset_cur_hex_line_buff();
+  
+  // Reset the hex file info variables
+  reset_hex_file_info();
+}
+
+// --------------------------------------------------------------------------
+// Can Bus Message Handlers
+// --------------------------------------------------------------------------
+
+HexTransfer::TransferInitMsg HexTransfer::unpack_transfer_init_msg(uint8_t (&buf)[8]) {
+  // Initialize the TransferInitMsg structure
+  TransferInitMsg m{};
 
   // Reconstruct the 64-bit integer from 8 Little Endian bytes
   uint64_t packed = 0;
   for (int i = 0; i < 8; i++) {
+    // Shift the byte into the correct position in the 'packed' integer
     packed |= (uint64_t)buf[i] << (8 * i);
   }
 
   // Extract each field from 'packed'
-  m.msg_type      = (packed >> 0) & 0x1;
-  m.line_num      = (packed >> 1) & 0x7FFF;
-  m.chunk_num     = (packed >> 16) & 0x0F;
-  m.total_chunks  = (packed >> 20) & 0x0F;
+  m.msg_type           = (packed >> 0) & 0x1;    // 0x1 = 2^1 - 1      (1 bit mask)
+  m.line_count         = (packed >> 1) & 0x7FFF; // 0x7FFF = 2^15 - 1 (15 bit mask)
+  m.file_checksum      = (packed >> 16) & 0xFFFFFFFF; // 0xFFFFFFFF = 2^32 - 1 (32 bit mask)
+  m.init_msg_checksum   = (packed >> 48) & 0xFFFF; // 0xFFFF = 2^16 - 1 (16 bit mask)
+
+  // Calculate the checksum of the message
+  const uint8_t* data = reinterpret_cast<const uint8_t*>(&m);
+  m.calculated_msg_checksum = CRC32.crc32(data, (unsigned int)(48));
+  // Return the unpacked message
+  return m;
+}
+
+HexTransfer::TransferSegmentMsg HexTransfer::unpack_transfer_segment_msg(uint8_t (&buf)[8]) {
+  // Initialize the TransferSegmentMsg structure
+  TransferSegmentMsg m{};
+
+  // Reconstruct the 64-bit integer from 8 Little Endian bytes
+  uint64_t packed = 0;
+  for (int i = 0; i < 8; i++) {
+    // Shift the byte into the correct position in the 'packed' integer
+    packed |= (uint64_t)buf[i] << (8 * i);
+  }
+
+  // Extract each field from 'packed'
+  m.msg_type      = (packed >> 0) & 0x1;    // 0x1 = 2^1 - 1      (1 bit mask)
+  m.line_num      = (packed >> 1) & 0x7FFF; // 0x7FFF = 2^15 - 1  (15 bit mask)
+  m.segment_num     = (packed >> 16) & 0x0F;  // 0x0F = 2^4 - 1     (4 bit mask)
+  m.total_segments  = (packed >> 20) & 0x0F;  // 0x0F = 2^4 - 1     (4 bit mask)
 
   // Then the next 40 bits contain data
   for (int i = 0; i < MAX_HEX_CHUNK_SIZE; i++) {
-    m.hex_data[i] = (packed >> (24 + 8 * i)) & 0xFF;
+    m.hex_data[i] = (packed >> (24 + 8 * i)) & 0xFF; // 0xFF = 2^8 - 1 (8 bit mask)
   }
 
   // Return the unpacked message
   return m;
 }
 
-bool HexTransfer::process_transfer_chunk_msg(TransferChunkMsg &msg) {
+bool HexTransfer::process_transfer_init_msg(TransferInitMsg &msg) {
+  // Check if the message type is valid
+  if (msg.msg_type != 0) {
+    return false;
+  }
+  
+  // Log the received message
+  new_transfer_init_msg_received = true;
+
+  // Check if the checksum is valid
+  if (msg.init_msg_checksum != msg.calculated_msg_checksum) {
+    // Checksum error, return false
+    transfer_init_msg_error = true;
+    return false;
+  }
+  
+  // Log the successful message
+  transfer_init_msg_error = false;
+  
+  // Abort any previous transfers if any
+  abort_transfer();
+
+  // Set the transfer in progress flag
+  transfer_in_progress = true;
+  
+  // Set the file checksum
+  received_file_checksum = msg.file_checksum;
+  
+  // Set the line count
+  hex_line_segment_count = msg.line_count;
+  
+  // Return success
+  return true;
+}
+
+bool HexTransfer::process_transfer_segment_msg(TransferSegmentMsg &msg) {
   // Check if the line number matches the current line number
-  if (msg.line_num != cur_hex_line_num) {
+  if (msg.line_num != hex_line_num) {
     // Line number does not match, handle error or reset
     Serial.println("Line number mismatch!");
     return false;
   }
   
-  // Check if the chunk count matches the existing chunk count
-  if (cur_hex_line_chunk_count == -1) {
-    // First chunk, initialize the chunk count
-    cur_hex_line_chunk_count = msg.total_chunks;
+  // Check if the segment count matches the existing segment count
+  if (hex_line_segment_count == -1) {
+    // First segment, initialize the segment count and hex_line_segments_received list
+    hex_line_segment_count = msg.total_segments;
+    hex_line_segments_received = new bool[hex_line_segment_count];
+    for (int i = 0; i < hex_line_segment_count; i++) {
+      hex_line_segments_received[i] = false;
+    }
   }
-  else if (msg.chunk_num != cur_hex_line_chunk_count) {
-    // Chunk count does not match that of previous messages for this hex line
-    Serial.println("Chunk number mismatch!");
+  else if (msg.segment_num != hex_line_segment_count) {
+    // Segment count does not match that of previous messages for this hex line
+    Serial.println("Segment number mismatch!");
     return false;
   }
   
-  // Check if the chunk number is valid
-  if (msg.chunk_num >= cur_hex_line_chunk_count) {
-    // Invalid chunk number, handle error
-    Serial.println("Invalid chunk number!");
+  // Check if the segment number is valid
+  if (msg.segment_num >= hex_line_segment_count) {
+    // Invalid segment number, handle error
+    Serial.println("Invalid segment number!");
     return false;
   }
   
   // Copy the 5 bytes of hex data into the current hex line data
   for (int i = 0; i < MAX_HEX_CHUNK_SIZE; i++) {
-    cur_hex_line_data[msg.chunk_num * MAX_HEX_CHUNK_SIZE + i] = msg.hex_data[i];
+    hex_line_buf[msg.segment_num * MAX_HEX_CHUNK_SIZE + i] = msg.hex_data[i];
   }
   
-  // Log the received chunk in chunks_received
-  chunks_received[msg.chunk_num] = true;
-  
-  // Update the all_chunks_received flag
-  all_chunks_received = true;
-  for (int i = 0; i < cur_hex_line_chunk_count; i++) {
-    if (!chunks_received[i]) {
-      all_chunks_received = false;
-      break;
-    }
-  }
+  // Mark the segment as received
+  hex_line_segments_received[msg.segment_num] = true;
   
   // Return true
   return true;
 }
 
-ParsedHexLine HexTransfer::parse_and_validate_hex_line(const char (&buf)[MAX_HEX_LINE_SIZE])
+
+// --------------------------------------------------------------------------
+// Hex Line Processing Functions
+// --------------------------------------------------------------------------
+
+HexTransfer::HexResult HexTransfer::handle_received_hex_line() {
+  // All segments have been received, parse and validate the hex line
+  ParsedHexLine hex_line = parse_and_validate_hex_line(hex_line_buf);
+  
+  // Check if the hex line is valid
+  if (!hex_line.valid) {
+    reset_cur_hex_line_buff();
+    return HexResult::HEX_LINE_PARSE_ERROR;
+  }
+
+  // Process the hex line
+  if (!process_hex_line(hex_line)) {
+    reset_cur_hex_line_buff();
+    return HexResult::HEX_LINE_PROCESSING_ERROR;
+  }
+  
+  // Add the hex line to the checksum
+  add_hex_line_to_checksum();
+  
+  // Increment the line number
+  hex_line_num++;
+  
+  // Clear the hex line buffer
+  reset_cur_hex_line_buff();
+  
+  // Return success
+  return HexResult::HEX_LINE_OK;
+}
+
+HexTransfer::ParsedHexLine HexTransfer::parse_and_validate_hex_line(const char (&buf)[MAX_HEX_LINE_SIZE])
 {
+  // Checks Done for Line Validation:
+  // 1. Line is at least 11 bytes long
+  // 2. Line starts with a colon
+  // 3. Byte count is less than or equal to 16 
+  //    (Format allows 255, but teensy3.5 only uses 16 bytes segments)
+  // 4. Line length matches the byte count
+  //    (Line length = 11 + byte_count * 2)
+  // 5. Record type is valid (Must be between 0 and 5)
+  // 6. Checksum is valid
+
+  // Data Parsed from the hex line
+  // Parse 1. byte count
+  // Parse 2. address
+  // Parse 3. record type
+  // Parse 4. data bytes
+  // Parse 5. checksum
+  
   // Initialize the parsed hex line
   ParsedHexLine hex_line;
+  hex_line.valid = true;
+  unsigned int checksum = 0;
   
   // Find the length of the hex line. Unused bytes are filled with PAD (0xFF)
   size_t lineLen = 0;
@@ -121,19 +397,19 @@ ParsedHexLine HexTransfer::parse_and_validate_hex_line(const char (&buf)[MAX_HEX
     lineLen++;
   }
   
-  // Check that the line is at least 11 bytes long (minimum length for a valid hex line)
+  // Check 1: Line is at least 11 bytes long
   if (lineLen < 11) {
     hex_line.valid = false;
     return hex_line;
   }
   
-  // Check that the first byte is a colon
+  // Check 2: Line starts with a colon
   if (buf[0] != ':') {
     hex_line.valid = false;
     return hex_line;
   }
 
-  // We expect the layout:
+  // We expect the layout to be:
   //   : [byte_count:2 hex] [address:4 hex] [rec_type:2 hex] [data:2 * byte_count hex] [checksum:2 hex]
   // Read more about the Intel HEX format here: https://en.wikipedia.org/wiki/Intel_HEX  
   
@@ -142,23 +418,23 @@ ParsedHexLine HexTransfer::parse_and_validate_hex_line(const char (&buf)[MAX_HEX
   // Set the pointer to the first byte after the colon
   ptr = buf + 1;
   
-  // Parse the byte count
+  // Parse 1: Byte count
   if (!sscanf (ptr, "%02x", &hex_line.byte_count)) {
     hex_line.valid = false;
     return hex_line;
   }
-  // Move the pointer bast the byte count value
+  checksum += hex_line.byte_count;
   ptr += 2;
   
-  // Check if the byte count is 16 or less
+  // Check 3: Check if the byte count is valid.
   // NOTE: The technical limit is 255, but the teensy3.5 only 
-  //       uses 16 bytes chunks in the data records of its hex files
+  //       uses 16 bytes segments in the data records of its hex files
   if (hex_line.byte_count > 16) {
     hex_line.valid = false;
     return hex_line;
   }
   
-  // Check if the byte count is valid. (I.E. the line is as long as it says)
+  // Check 4: Check if the line length matches the byte count
   // We add 11 because there is always a colon(1), byte count(2), address(4), record type(2), and checksum(2)
   // We multiply the byte count by 2 because each byte is represented by 2 hex digits written in ascii
   if (lineLen != (11 + hex_line.byte_count * 2)) {
@@ -166,23 +442,30 @@ ParsedHexLine HexTransfer::parse_and_validate_hex_line(const char (&buf)[MAX_HEX
     return hex_line;
   }
   
-  // Parse the address
+  // Parse 2: Address
   if (!sscanf (ptr, "%4x", &hex_line.address)) {
     hex_line.valid = false;
     return hex_line;
   }
-  // Move the pointer past the address value
+  checksum += (hex_line.address >> 8) & 0xFF;
   ptr += 4;
   
-  // Parse the record type
+  // Parse 3: Record type
   if (!sscanf (ptr, "%02x", &hex_line.record_type)) {
     hex_line.valid = false;
     return hex_line;
   }
-  // Move the pointer past the record type value
   ptr += 2;
-  
+
+  // Check 5: Check if the record type is valid
+  if (hex_line.record_type > 5) {
+    hex_line.valid = false;
+    return hex_line;
+  }
+
   // Parse the data bytes
+  // Note: past this point the data is stored as raw bytes
+  //       not as hex represented in ascii like before.
   for (size_t i = 0; i < hex_line.byte_count; i++) {
     if (!sscanf (ptr, "%02x", &hex_line.data[i])) {
       hex_line.valid = false;
@@ -192,8 +475,214 @@ ParsedHexLine HexTransfer::parse_and_validate_hex_line(const char (&buf)[MAX_HEX
     ptr += 2;
   }
   
-  hex_line.address = ((buf[3] - '0') * 16 + (buf[4] - '0')) << 8;
+  // Parse the checksum
+  if (!sscanf (ptr, "%02x", &hex_line.checksum)) {
+    hex_line.valid = false;
+    return hex_line;
+  }  
   
-  // Parse the record type
+  // Return the parsed hex line
   return hex_line;
+}
+
+bool HexTransfer::process_hex_line(ParsedHexLine &hex_line) {
+  // Create a switch statement to handle the different record types
+  switch (hex_line.record_type) {
+    case 0:
+      return process_hex_data_record(hex_line);
+    case 1:
+      return process_hex_eof_record(hex_line);
+    case 2:
+      return process_hex_extended_segment_address_record(hex_line);
+    case 3:
+      return process_hex_start_segment_address_record(hex_line);
+    case 4:
+      return process_hex_extended_linear_address_record(hex_line);
+    case 5:
+      return process_hex_start_linear_address_record(hex_line);
+    default:
+      // Invalid record type, handle error
+      return false;
+  }
+}
+
+bool HexTransfer::process_hex_data_record(ParsedHexLine &hex_line) {
+  // Check if the record type is Data
+  if (hex_line.record_type != 0) {
+    return false;
+  }
+  
+  // Update the min and max addresses
+  if (base_address + hex_line.address + hex_line.byte_count > max_address) {
+    max_address = base_address + hex_line.address + hex_line.byte_count;
+  }
+  if (base_address + hex_line.address < min_address) {
+    min_address = base_address + hex_line.address;
+  }
+  
+  // Check if the address is too large
+  if (max_address > (FLASH_BASE_ADDR + flash_buffer_size)) {
+    return false;
+  }
+  
+  // Calculate the address in the flash buffer we will copy the data to
+  uint32_t addr = flash_buffer_addr + base_address + hex_line.address - FLASH_BASE_ADDR;
+  
+  if (IN_FLASH(flash_buffer_addr)) {
+    char *bytePtr = reinterpret_cast<char*>(hex_line.data);
+    int error = flash_write_block( addr, bytePtr, (uint32_t)hex_line.byte_count );
+    if (error) {
+      // Print an error message
+      Serial.printf( "abort - error %02X in flash_write_block()\n", error );
+      return false;
+    }
+  }
+  else if (!IN_FLASH(flash_buffer_addr)) {
+    // This is to support RAM buffer transfers, not available on Teensy 3.5
+    memcpy(reinterpret_cast<void*>(addr), hex_line.data, hex_line.byte_count);
+  }
+  
+  return true;
+}
+
+bool HexTransfer::process_hex_eof_record(ParsedHexLine &hex_line) {
+  // Check if the record type is EOF
+  if (hex_line.record_type != 1) {
+    return false;
+  }
+  
+  // Check if this is the last line
+  if (hex_line_num != total_lines - 1) {
+    // Not the last line, handle error
+    return false;
+  }
+
+  // Set the EOF flag
+  eof_received = true;
+
+  // Return success
+  return true;
+}
+
+bool HexTransfer::process_hex_extended_segment_address_record(ParsedHexLine &hex_line) {
+  // Check if the record type is Extended Segment Address
+  if (hex_line.record_type != 2) {
+    return false;
+  }
+
+  // Set the base address for the hex file
+  base_address = ((hex_line.data[0] << 8) | hex_line.data[1]) << 4;
+
+  // Return success
+  return true;
+}
+
+bool HexTransfer::process_hex_start_segment_address_record(ParsedHexLine &hex_line) {
+  // Check if the record type is Start Segment Address
+  if (hex_line.record_type != 3) {
+    return false;
+  }
+
+  // This record type is not used in this implementation
+  // This is used to set the starting execution address for the program
+  // Teensyduinos always sets the start address to 0x0000
+
+  // Return success
+  return true;
+}
+
+bool HexTransfer::process_hex_extended_linear_address_record(ParsedHexLine &hex_line) {
+  // Check if the record type is Extended Linear Address
+  if (hex_line.record_type != 4) {
+    return false;
+  }
+
+  // Set the base address for the hex file
+  base_address = ((hex_line.data[0] << 8) | hex_line.data[1]) << 16;
+
+  // Return success
+  return true;
+}
+
+bool HexTransfer::process_hex_start_linear_address_record(ParsedHexLine &hex_line) {
+  // Check if the record type is Start Linear Address
+  if (hex_line.record_type != 5) {
+    return false;
+  }
+
+  // This record type is not used in this implementation
+  // This is used to set the starting execution address for the program
+  // Teensyduinos always sets the start address to 0x0000
+
+  // Return success
+  return true;
+}
+
+
+// --------------------------------------------------------------------------
+// Helper Functions
+// --------------------------------------------------------------------------
+
+bool HexTransfer::are_all_segments_received() {
+  // Check if all segments have been received
+  for (int i = 0; i < hex_line_segment_count; i++) {
+    if (!hex_line_segments_received[i]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+void HexTransfer::add_hex_line_to_checksum() {
+  // Get the length of the hex line without the padding
+  uint16_t len = 0;
+  while (len < MAX_HEX_LINE_SIZE && hex_line_buf[len] != PAD) {
+    len++;
+  }
+  
+  const uint8_t* data = reinterpret_cast<const uint8_t*>(hex_line_buf);
+
+  // Add the hex line to the checksum
+  computed_file_checksum = CRC32.crc32_upd(data, len);
+}
+
+bool HexTransfer::is_file_checksum_valid() {
+  // Check if the computed file checksum matches the expected checksum
+  if (computed_file_checksum != received_file_checksum) {
+    return false;
+  }
+  return true;
+}
+
+void HexTransfer::reset_hex_file_info() {
+  // Reset the hex file info variables
+  base_address = 0;
+  min_address = 0xFFFFFFFF;
+  max_address = 0;
+  total_lines = 0;
+  eof_received = false;
+  received_file_checksum = 0;
+  transfer_in_progress = false;
+  file_transfer_complete = false;
+  hex_line_num = 0;
+  computed_file_checksum = CRC32.crc32(nullptr, 0);
+}
+
+void HexTransfer::reset_cur_hex_line_buff() {
+  hex_line_segment_count = -1;
+  if (hex_line_segments_received != nullptr) {
+    delete[] hex_line_segments_received;
+  }
+  hex_line_segments_received = nullptr;
+  memset(hex_line_buf, PAD, sizeof(hex_line_buf));
+}
+
+bool HexTransfer::is_transfer_in_progress() {
+  // Check if a transfer is in progress
+  return transfer_in_progress;
+}
+
+bool HexTransfer::is_file_transfer_complete() {
+  // Check if the file transfer is complete
+  return file_transfer_complete;
 }

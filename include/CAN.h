@@ -8,15 +8,7 @@
 #include <i2c_t3.h>
 
 #include "FlexCAN.h"
-
-struct CanHexPayloadMsg {
-  // Total of 64 bits (8 bytes):
-  uint64_t msg_type     : 1;   // Bit 1: message type (1 bit)
-  uint64_t line_number  : 15;  // Bits 2–16: the line number (15 bits)
-  uint64_t chunk_num    : 4;   // Bits 17–20: current chunk number (4 bits)
-  uint64_t total_chunks : 4;   // Bits 21–24: total number of chunks the hex line has been split into (4 bits)
-  uint64_t hex_data     : 40;  // Bits 25–64: actual hex data (40 bits)
-};
+#include "HexTransfer.h"
 
 namespace CAN {
   union FloatToBytes {

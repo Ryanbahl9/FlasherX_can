@@ -367,6 +367,13 @@ bool HexTransfer::send_response(ResponseCode res, ErrorCode err) {
   return true;
 }
 
+bool HexTransfer::pack_response(ResponseCode res, uint8_t (&buf)[8]) {
+  /// TODO: Pack the response message into the buffer
+  
+  // Return success
+  return true;
+}
+
 // --------------------------------------------------------------------------
 // Hex Line Processing Functions
 // --------------------------------------------------------------------------

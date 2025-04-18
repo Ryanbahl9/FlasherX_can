@@ -55,6 +55,8 @@ extern "C" {
   #include "FlashTxx.h"		// TLC/T3x/T4x/TMM flash primitives
 }
 
+#include <FastCRC.h>
+
 const int cs = BUILTIN_SDCARD;	// SD chip select pin
 const int led = LED_BUILTIN;	// LED pin
 Stream *serial = &Serial;	// Serial (USB) or Serial1, Serial2, etc. (UART)
@@ -99,7 +101,8 @@ void setup ()
       
   // init can
   CAN::init();
-			
+  HexTransfer::init();
+  
 #if (LARGE_ARRAY) // if true, access array so it doesn't get optimized out
   serial->printf( "Large Array -- %08lX\n", (uint32_t)&a[15][15][15][15][15] );
 #endif
@@ -108,6 +111,7 @@ void setup ()
 void loop ()
 {
   CAN::handleInbox();
+  HexTransfer::update();
   // uint32_t buffer_addr, buffer_size;
 
   // // create flash buffer to hold new firmware

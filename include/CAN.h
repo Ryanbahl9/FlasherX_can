@@ -19,21 +19,14 @@ namespace CAN {
     int32_t val;
     uint8_t bytes[4];
   };
-
   
   void init();
-  void print_hex_payload_msg(uint8_t (&buf)[8]);
   void handleInbox();
   void wipeMessage();
   boolean write(CAN_message_t msg);
   void _printCAN(CAN_message_t txmsg);
   void write(uint8_t deviceID, uint8_t commandID, uint8_t payloadLength, uint8_t buffer[]);
-  void write(uint8_t deviceID, uint8_t commandID, int32_t payload);
-  void write(uint8_t deviceID, uint8_t commandID, uint8_t payload);
-  void write(uint8_t deviceID, uint8_t commandID, int payload);
-  void write(uint8_t deviceID, uint8_t commandID, float payload);
-  float readFloat(CAN_message_t rxmsg);
-  int32_t readInt32(CAN_message_t rxmsg);
+
 }
 
 #endif
